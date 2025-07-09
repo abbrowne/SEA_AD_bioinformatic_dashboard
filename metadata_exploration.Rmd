@@ -1,0 +1,182 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r explore SEA AD metadata}
+
+###Metadata files include:
+### SEAAD_MTG_RNAseq_all-nuclei_metadata.2024-02-13.csv
+### SEAAD_MTG_ATACseq_all-nuclei_metadata.2024-12-06.csv
+### sea-ad_cohort_mtg-tissue_extractions-luminex_data.xlsx
+### sea-ad_cohort_mri_volumetrics.xlsx
+### sea-ad_cohort_harmonized_cognitive_scores_20241213.xlsx
+### sea-ad_cohort_donor_metadata_072524.xlsx
+### sea-ad_all_mtg_quant_neuropath_bydonorid_081122.csv
+### SEAAD_A9_RNAseq_all-nuclei_metadata.2024-02-13.csv
+### sea-ad.csv
+### 
+
+# Install if needed
+#install.packages("readxl")    # for Excel files
+#install.packages("dplyr")     # for data manipulation
+#install.packages("skimr")     # for detailed summaries
+
+# Load libraries
+library(readxl)
+library(dplyr)
+library(skimr)
+
+metadata_files <- c("SEAAD_MTG_RNAseq_all-nuclei_metadata.2024-02-13.csv","SEAAD_MTG_ATACseq_all-nuclei_metadata.2024-12-06.csv",
+                    "sea-ad_cohort_mtg-tissue_extractions-luminex_data.xlsx","sea-ad_cohort_mri_volumetrics.xlsx",
+                    "sea-ad_cohort_harmonized_cognitive_scores_20241213.xlsx","sea-ad_cohort_donor_metadata_072524.xlsx",
+                    "sea-ad_all_mtg_quant_neuropath_bydonorid_081122.csv","SEAAD_A9_RNAseq_all-nuclei_metadata.2024-02-13.csv",
+                    "sea-ad.csv")
+
+for(temp_file_i in 1:length(metadata_files)){
+  # Replace with your dataframe of choice
+  
+  temp_file <- paste0("E:/Projects/Brain/Data/SEAAD/",metadata_files[temp_file_i])
+  
+  if(grepl(".csv",metadata_files[temp_file_i])){
+    df <- read.csv(temp_file)
+  }else if(grepl(".xlsx",metadata_files[temp_file_i])){
+    df <- read_excel(temp_file)
+  }
+
+  # Total rows and columns
+  cat("Total Rows:", nrow(df), "\n")
+  cat("Total Columns:", ncol(df), "\n\n")
+
+  # Column names
+  cat("Column Names:\n")
+  print(colnames(df))
+
+  print(skim(df))
+
+}
+
+###Process metadata for disease scoring to derive continuous pseudoprogression score
+temp_file <- paste0("E:/Projects/Brain/Data/SEAAD/",metadata_files[6])
+donor_metadata <- read_excel(temp_file)
+dim(donor_metadata)
+print(table(donor_metadata$Braak))
+print(table(donor_metadata$Thal))
+print(table(donor_metadata$`CERAD score`))
+
+donor_metadata$braak_stage <- NA
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak 0"] <- 0
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak I"] <- 1
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak II"] <- 2
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak III"] <- 3
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak IV"] <- 4
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak V"] <- 5
+donor_metadata$braak_stage[donor_metadata$Braak == "Braak VI"] <- 6
+donor_metadata$cerad_score <- NA
+donor_metadata$cerad_score[donor_metadata$`CERAD score` == "Absent"] <- 0
+donor_metadata$cerad_score[donor_metadata$`CERAD score` == "Sparse"] <- 1
+donor_metadata$cerad_score[donor_metadata$`CERAD score` == "Moderate"] <- 2
+donor_metadata$cerad_score[donor_metadata$`CERAD score` == "Frequent"] <- 3
+donor_metadata$thal_phase <- NA
+donor_metadata$thal_phase[donor_metadata$Thal == "Thal 0"] <- 0
+donor_metadata$thal_phase[donor_metadata$Thal == "Thal 1"] <- 1
+donor_metadata$thal_phase[donor_metadata$Thal == "Thal 2"] <- 2
+donor_metadata$thal_phase[donor_metadata$Thal == "Thal 3"] <- 3
+donor_metadata$thal_phase[donor_metadata$Thal == "Thal 4"] <- 4
+donor_metadata$thal_phase[donor_metadata$Thal == "Thal 5"] <- 5
+
+donor_metadata <- as.data.frame(donor_metadata)
+rownames(donor_metadata) <- donor_metadata$`Donor ID`
+
+write.csv(donor_metadata,file="E:/Projects/Brain/Data/SEAAD/modified_donor_metadata.csv")
+
+donor_metadata <- read.csv("E:/Projects/Brain/Data/SEAAD/modified_donor_metadata.csv")
+
+temp_file <- paste0("E:/Projects/Brain/Data/SEAAD/",metadata_files[1])
+snRNAseq_meta <- read.csv(temp_file)
+dim(snRNAseq_meta)
+snRNAseq_meta$cell_type <- snRNAseq_meta$Subclass
+snRNAseq_meta$cerad_score <- donor_metadata[snRNAseq_meta$Donor.ID,"cerad_score"]
+snRNAseq_meta$braak_stage <- donor_metadata[snRNAseq_meta$Donor.ID,"braak_stage"]
+snRNAseq_meta$thal_phase <- donor_metadata[snRNAseq_meta$Donor.ID,"thal_phase"]
+
+write.csv(snRNAseq_meta,file="E:/Projects/Brain/Data/SEAAD/modified_snRNAseq_metadata.csv")
+
+temp_file <- paste0("E:/Projects/Brain/Data/SEAAD/",metadata_files[2])
+snATACseq_meta <- read.csv(temp_file)
+dim(snATACseq_meta)
+snATACseq_meta$cell_type <- snATACseq_meta$Subclass
+snATACseq_meta$cerad_score <- donor_metadata[snATACseq_meta$Donor.ID,"cerad_score"]
+snATACseq_meta$braak_stage <- donor_metadata[snATACseq_meta$Donor.ID,"braak_stage"]
+snATACseq_meta$thal_phase <- donor_metadata[snATACseq_meta$Donor.ID,"thal_phase"]
+
+write.csv(snATACseq_meta,file="E:/Projects/Brain/Data/SEAAD/modified_snATACseq_metadata.csv")
+
+# CSV file
+#csv_data <- read.csv("E:/Projects/Brain/Data/SEAAD/sea-ad_cohort_donor_metadata_072524.xlsx")
+
+# XLSX file (first sheet by default)
+#xlsx_data <- read_excel("E:/Projects/Brain/Data/SEAAD/sea-ad_cohort_donor_metadata_072524.xlsx")
+
+##Create merged snRNAseq+ATACseq metadata
+rna_meta <- read.csv("E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_RNAseq_all-nuclei_metadata.2024-02-13.csv")
+rownames(rna_meta) <- rna_meta$sample_id
+atac_meta <- read.csv("E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_ATACseq_all-nuclei_metadata.2024-12-06.csv")
+rownames(atac_meta) <- atac_meta$sample_id
+common_cols <- intersect(colnames(rna_meta), colnames(atac_meta))
+clean_atac_meta <- atac_meta[, setdiff(colnames(atac_meta), common_cols), drop = FALSE]
+clean_atac_meta$sample_id <- rownames(clean_atac_meta)
+
+merged_meta <- full_join(rna_meta, clean_atac_meta, by = "sample_id") %>%
+    filter(sample_id %in% intersect(rownames(rna_meta), rownames(clean_atac_meta)))
+
+merged_meta$donor_id <- merged_meta$Donor.ID
+
+write.csv(merged_meta,"E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_Multiome_all-nuclei_merged_metadata.csv")
+
+
+```
+
+```{r load h5ad datasets to preview}
+
+library(reticulate)
+use_virtualenv("r-reticulate", required = TRUE)
+anndata <- import("anndata")
+test_file <- "E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_RNAseq_final-nuclei.2024-02-13.h5ad"
+adata <- anndata$read_h5ad(test_file, backed = "r")
+
+###
+library(Seurat)
+library(SeuratDisk)
+library(SingleCellExperiment)
+library(zellkonverter)
+
+sce <- readH5AD("E:/Projects/Brain/SEA_AD_analysis/test_results/aggregated_multiomic/aggregated_rna_data.h5ad")
+seurat_obj <- as.Seurat(sce, counts = "X",data = NULL)
+# Identify all other assays to add
+other_assays <- setdiff(assayNames(sce), "X")
+
+# Add them one by one to Seurat
+for (assay_name in other_assays) {
+  
+  assay_data <- assay(sce, assay_name)
+  
+  # Create a new Seurat Assay object
+  seurat_assay <- CreateAssayObject(counts = as.matrix(assay_data))
+  
+  # Store under a new assay slot name
+  seurat_obj[[assay_name]] <- seurat_assay
+  
+}
+
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
