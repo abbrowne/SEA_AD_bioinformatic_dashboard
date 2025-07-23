@@ -48,5 +48,6 @@ This section will include:
   3. Example commands to run the notebook and dashboard
 
 Notes
+
 SEA AD Study link: https://portal.brain-map.org/explore/seattle-alzheimers-disease/whatis
 
