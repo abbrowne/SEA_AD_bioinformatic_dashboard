@@ -1,164 +1,70 @@
-# Cell-type-Specific Early Vulnerability Signatures in Alzheimer's Disease
+SEA-AD Bioinformatic Dashboard
+Overview
+This project supports the analysis and visualization of single-nucleus RNA-seq and ATAC-seq data from the Seattle Alzheimer's Disease (SEA-AD) cohort. It includes workflows for processing, integrating, and visualizing multiomic data across donors and cell types, with the aim of identifying molecular signatures associated with disease progression.
 
-## Project Overview
-This project analyzes multimodal single-cell data from the SEA-AD dataset to identify early vulnerability signatures in specific cell types during Alzheimer's disease progression, with a focus on layer 2/3 IT excitatory neurons and Sst+ interneurons.
+Key components include:
 
-## Project Structure
-```
-.
-├── data/                      # Raw and processed data
-│   ├── raw/                  # Raw data files
-│   ├── processed/            # Processed data files
-│   └── metadata/             # Sample metadata and annotations
-├── notebooks/                # Jupyter notebooks for analysis
-├── scripts/                  # Python/R scripts
-│   ├── preprocessing/        # Data preprocessing scripts
-│   ├── analysis/            # Analysis scripts
-│   └── visualization/       # Visualization scripts
-├── results/                  # Analysis results
-│   ├── figures/             # Generated figures
-│   └── tables/              # Output tables
-└── requirements.txt          # Python dependencies
-```
+Preprocessing & integration of RNA-seq and ATAC-seq data at the gene level
 
-## Setup Instructions
+Multi-donor aggregation and filtering
 
-1. Create a conda environment:
+Imputation and normalization of sparse matrices
+
+Correlation and enrichment analysis
+
+Dashboard creation for interactive exploratory analysis
+
+Project Structure (Updated)
 ```bash
-conda create -n sea_ad python=3.9
-conda activate sea_ad
+SEA_AD_bioinformatic_dashboard/
+├── data/                         # Input and intermediate data files (not tracked)
+├── streamlit_dashboard_forGit.py    # Main workflow notebook
+├── streamlit_dashboard_forGit.py                    # Streamlit dashboard interface
+├── results/                      # Output files (aggregated, filtered, imputed) (not tracked)
+├── scripts/                      # Legacy scripts (some steps replaced by notebooks) (not tracked)
+├── README.md
 ```
+Updated Workflow
+The current pipeline is implemented in the notebook:
 
-2. Install required packages:
-```bash
-pip install -r requirements.txt
-```
+streamlit_dashboard_forGit.py
 
-## Multiomic Data Aggregation
+Load individual donor H5AD files for RNA and ATAC
 
-For multiomic snRNAseq+snATACseq analysis, the sequencing data is split by type and donor. The `aggregate_multiomic.py` script aggregates data from multiple donors into separate RNA and ATAC AnnData files for independent analysis.
+Subset cells by subtype and donor
 
-### Usage
+Normalize and log-transform expression and accessibility data
 
-```bash
-python scripts/analysis/aggregate_multiomic.py \
-    --metadata-file data/metadata/multiomic_metadata.csv \
-    --rna-data-dir data/rna_files \
-    --atac-data-dir data/atac_files \
-    --output-dir results/aggregated_multiomic
-```
+Map ATAC peaks to genes and align with RNA features
 
-### Expected Data Structure
+Merge RNA and ATAC by common cells and genes
 
-```
-data/
-├── metadata/
-│   └── multiomic_metadata.csv  # Metadata file with multiomic sample info
-├── rna_files/
-│   ├── donor_001_rna_data.h5ad
-│   ├── donor_002_rna_data.h5ad
-│   └── ...
-└── atac_files/
-    ├── donor_001_atac_data.h5ad
-    ├── donor_002_atac_data.h5ad
-    └── ...
-```
+Perform imputation (e.g., SoftImpute, or deep learning models)
 
-### Metadata Requirements
+Save processed subsets for dashboard exploration
 
-The metadata CSV file should contain:
-- `donor_id`: Unique identifier for each donor
-- `sample_id`: Unique identifier for each sample/cell
-- `cell_type`: Cell type annotation (optional)
-- `cps_score`: Cognitive Performance Score (optional)
-- `braak_stage`: Braak stage (optional)
+Interactive Dashboard
+The streamlit_dashboard_forGit.py file implements an interactive Streamlit dashboard that allows users to:
 
-**Note**: All samples included in the metadata file are assumed to have multiomic data.
+Load and filter cell subsets by metadata (cell type, donor, etc.)
 
-### Output Files
+Define groups for comparative analysis
 
-The script generates:
-- `aggregated_rna_data.h5ad`: Aggregated RNA-seq data from all donors
-- `aggregated_atac_data.h5ad`: Aggregated ATAC-seq data from all donors
-- `aggregation_summary.csv`: Summary statistics of the aggregation
-- `donor_processing_report.csv`: Detailed report of each donor's processing status
-- `rna_sample_metadata.csv`: RNA sample metadata
-- `atac_sample_metadata.csv`: ATAC sample metadata
+View dimensionality reduction plots (UMAP, PCA)
 
-Files are saved without compression for easy loading in RStudio on Windows.
+Perform gene-level comparisons and enrichment
 
-### Reporting Features
+Visualize progression-related molecular changes
 
-The aggregation script provides comprehensive reporting:
+Getting Started
+This section will include:
 
-1. **Console Output**: Real-time status updates and final summary
-2. **Donor Processing Report**: Detailed status for each donor including:
-   - File discovery status (RNA/ATAC files found/missing)
-   - Cell counts (loaded vs. subset)
-   - Error messages for failed donors
-3. **Summary Statistics**: Overall success rates and file counts
-4. **Log Files**: Detailed logging with timestamps
+Installation instructions
 
-### Separate AnnData Structure
+Environment setup (conda, pip, requirements.txt)
 
-The aggregated data is stored in separate AnnData objects:
+Example commands to run the notebook and dashboard
 
-```python
-# RNA Data (aggregated_rna_data.h5ad)
-rna_adata.X                    # RNA-seq data matrix
-rna_adata.obs                  # Sample metadata (donor_id, cell_type, etc.)
-rna_adata.var                  # RNA gene information
+Notes
+This section can list any assumptions, data access notes, or links to SEA-AD metadata.
 
-# ATAC Data (aggregated_atac_data.h5ad)
-atac_adata.X                   # ATAC-seq data matrix
-atac_adata.obs                 # Sample metadata (donor_id, cell_type, etc.)
-atac_adata.var                 # ATAC peak information
-```
-
-**Note**: Both files contain the same cells (those with multiomic data) and can be easily loaded and analyzed separately or together. This approach ensures data integrity while providing flexibility for independent analysis of each data type.
-
-### Testing
-
-For testing the aggregation workflow with a subset of data, use the test script:
-
-```bash
-python scripts/analysis/test_multiomic_aggregation.py \
-    --metadata-file data/metadata/multiomic_metadata.csv \
-    --rna-data-dir data/rna_files \
-    --atac-data-dir data/atac_files \
-    --output-dir test_results/aggregated_multiomic \
-    --max-donors 3
-```
-
-The test script processes only the first N donors (default: 3) and provides the same comprehensive reporting as the full script.
-
-### Example
-
-See `scripts/analysis/example_multiomic_aggregation.py` for a demonstration of the expected data structure and usage.
-
-## Analysis Workflow
-
-1. Data Preprocessing
-   - Quality control and filtering
-   - Cell type annotation
-   - Integration of snRNA-seq and snATAC-seq data
-
-2. Early Vulnerability Analysis
-   - CPS-based stratification
-   - Cell type abundance analysis
-   - Differential expression analysis
-
-3. Multi-modal Integration
-   - Gene expression and chromatin accessibility correlation
-   - Transcription factor analysis
-   - Pathway enrichment
-
-4. Spatial Analysis
-   - MERFISH data integration
-   - Layer-specific analysis
-   - Spatial gene expression patterns
-
-## Data Sources
-- SEA-AD snRNA-seq and snATAC-seq data (84 donors)
-- MERFISH spatial transcriptomics (27 donors)
-- Matched metadata (CPS score, Braak stage, etc.) # SEA_AD_bioinformatic_dashboard
