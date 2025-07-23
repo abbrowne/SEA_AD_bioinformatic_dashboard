@@ -146,6 +146,7 @@ write.csv(merged_meta,"E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_Multiome_all-nucle
 library(reticulate)
 use_virtualenv("r-reticulate", required = TRUE)
 anndata <- import("anndata")
+scipy <- import("scipy.sparse")
 test_file <- "E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_RNAseq_final-nuclei.2024-02-13.h5ad"
 adata <- anndata$read_h5ad(test_file, backed = "r")
 
@@ -155,8 +156,8 @@ library(SeuratDisk)
 library(SingleCellExperiment)
 library(zellkonverter)
 
-sce <- readH5AD("E:/Projects/Brain/SEA_AD_analysis/test_results/aggregated_multiomic/aggregated_rna_data.h5ad")
-seurat_obj <- as.Seurat(sce, counts = "X",data = NULL)
+sce <- readH5AD("E:/Projects/Brain/SEA_AD_analysis/results/aggregated_multiomic/rna_atac_subclass_combined/subclass_Astrocyte.h5ad")
+seurat_obj <- as.Seurat(sce)
 # Identify all other assays to add
 other_assays <- setdiff(assayNames(sce), "X")
 
@@ -172,6 +173,64 @@ for (assay_name in other_assays) {
   seurat_obj[[assay_name]] <- seurat_assay
   
 }
+
+```
+
+```{r check age vs progression score}
+
+test <- read.csv("E:/Projects/Brain/Data/SEAAD/SEAAD_MTG_Multiome_all-nuclei_merged_metadata.csv")
+test <- test[!duplicated(test$Donor.ID),]
+plot(test$Continuous.Pseudo.progression.Score, test$Age.at.Death,
+     xlab = "Column 1", ylab = "Column 2",
+     main = "Scatterplot of Column 1 vs Column 2",
+     pch = 19, col = "blue")
+abline(a = 62, b = 45, col = "red", lwd = 2)
+
+```
+
+
+```{r UCell run}
+
+library(UCell)
+library(stringr)
+library(zellkonverter)
+library(Matrix)
+
+rna_dir <- "E:/Projects/Brain/SEA_AD_analysis/results/aggregated_multiomic/subclass_split_rna/filtered/"
+atac_dir <- "E:/Projects/Brain/SEA_AD_analysis/results/aggregated_multiomic/subclass_split_atac/filtered/"
+
+gene.sets <- read.csv("E:/Projects/Brain/SEA_AD_analysis/AD_genesets.csv", stringsAsFactors=FALSE)
+gene.sets <- split(gene.sets$Gene, gene.sets$Gene_set)
+
+rna_files <- list.files(rna_dir)
+rna_files <- rna_files[grepl("_rna_expression",rna_files)]
+atac_files <- list.files(atac_dir)
+atac_files <- atac_files[grepl("_atac_accessibility",atac_files)]
+all_files <- c(rna_files,atac_files)
+
+for(temp_file_i in 1:length(all_files)){
+  temp_file <- all_files[temp_file_i]
+  if(grepl("_rna_expression",temp_file)){
+    temp_dir <- rna_dir
+    temp_mat <- read.csv(paste0(temp_dir,temp_file))
+    rownames(temp_mat) <- temp_mat$exp_component_name
+    temp_mat$exp_component_name <- NULL
+  }else if(grepl("_atac_accessibility",temp_file)){
+    temp_dir <- atac_dir
+    temp_mat <- read.csv(paste0(temp_dir,temp_file))
+    rownames(temp_mat) <- temp_mat$index
+    temp_mat$index <- NULL
+  }
+  temp_mat <- Matrix(as.matrix(temp_mat), sparse = TRUE)
+  
+  #sce <- readH5AD(paste0(file_dir,temp_file))
+  #test_df <- sce@assays@data$X
+  scores <- ScoreSignatures_UCell(t(temp_mat), features=gene.sets, chunk.size=5000, force.gc=TRUE, maxRank = 2000,ncores = 16)
+  output_filename <- str_replace(temp_file,".csv","_UCell.csv")
+  write.csv(round(scores,5),file=paste0(temp_dir,output_filename))
+  paste0("Finished with ",temp_file)
+}
+
 
 ```
 
