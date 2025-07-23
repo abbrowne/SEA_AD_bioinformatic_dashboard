@@ -6,10 +6,11 @@ import os
 import json
 import scanpy as sc
 from scipy.stats import spearmanr, ttest_ind, fisher_exact, chi2_contingency
+import gseapy as gp
 
 # --------- CONFIGURATION ---------
-RNA_DATA_DIR = "SEA_AD_analysis/results/aggregated_multiomic/subclass_split_rna/filtered"
-ATAC_DATA_DIR = "SEA_AD_analysis/results/aggregated_multiomic/subclass_split_atac/filtered"
+RNA_DATA_DIR = "/mnt/e/Projects/Brain/SEA_AD_analysis/results/aggregated_multiomic/subclass_split_rna/filtered"
+ATAC_DATA_DIR = "/mnt/e/Projects/Brain/SEA_AD_analysis/results/aggregated_multiomic/subclass_split_atac/filtered"
 
 CELLTYPE_TO_FILE = {
     "L2/3 IT": "scored_subclass_L2_3_IT_rna.h5ad",
@@ -54,6 +55,91 @@ ALLOWED_FEATURES = [
     "Continuous Pseudo-progression Score", "Severely Affected Donor",
 ]
 
+GENESET_DIR = "/mnt/e/Projects/Brain/SEA_AD_analysis/results/aggregated_multiomic/subclass_split_rna/filtered"  # adjust as needed
+
+def load_geneset_summary_for_celltype(cell_type):
+    file_base = cell_type.replace("/", "_").replace(" ", "_")
+    geneset_file = os.path.join(GENESET_DIR, f"filtered_subclass_{file_base}_genesetN.csv")
+    if os.path.exists(geneset_file):
+        df = pd.read_csv(geneset_file)
+        # Add the _UCell suffix for matching
+        df['Gene_set'] = df['Gene_set'].astype(str) + "_UCell"
+        return df
+    else:
+        st.warning(f"Geneset summary not found: {geneset_file}")
+        return pd.DataFrame()
+
+def merge_rna_atac_table(df, geneset_summary=None):
+    df_rna = df[df['UCell_Score'].str.endswith('_rna')].copy()
+    df_atac = df[df['UCell_Score'].str.endswith('_atac')].copy()
+    df_rna['UCell_Base'] = df_rna['UCell_Score'].str.replace('_rna$', '', regex=True)
+    df_atac['UCell_Base'] = df_atac['UCell_Score'].str.replace('_atac$', '', regex=True)
+    merged = pd.merge(
+        df_rna.set_index('UCell_Base'),
+        df_atac.set_index('UCell_Base'),
+        left_index=True, right_index=True, how='outer',
+        suffixes=('_rna', '_atac')
+    )
+    merged.index.name = "UCell_Score"
+    merged.reset_index(inplace=True)
+
+    # --- Merge in geneset summary info if provided ---
+    if geneset_summary is not None and not geneset_summary.empty:
+        # geneset_summary['geneset_name'] should have _UCell suffix already
+        geneset_summary = geneset_summary.drop_duplicates(subset=['Gene_set'])
+        merged = pd.merge(
+            merged,
+            geneset_summary,
+            left_on='UCell_Score',
+            right_on='Gene_set',
+            how='left'
+        )
+        print("AFTER MERGE:", merged.columns[merged.columns.duplicated()].tolist())
+        # DisplayName with gene count, e.g. "MYGENE_UCell (N=13)"
+        merged['DisplayName'] = merged['UCell_Score'] + " (N=" + merged['N_genes_in_set'].astype(str) + ")"
+    else:
+        merged['DisplayName'] = merged['UCell_Score']
+
+    # Average p-value
+    merged['Avg_pvalue'] = merged[['p-value_rna', 'p-value_atac']].mean(axis=1, skipna=True)
+
+    merged = merged[
+        ['DisplayName',
+         'Coefficient_rna', 'p-value_rna', 'R²_rna',
+         'N_overlap_RNA' if 'N_overlap_RNA' in merged.columns else None,
+         'Coefficient_atac', 'p-value_atac', 'R²_atac',
+         'N_overlap_ATAC' if 'N_overlap_ATAC' in merged.columns else None,
+         'Avg_pvalue']
+    ]
+    # Remove columns that are None (if geneset info not present)
+    merged = merged.loc[:, merged.columns.notnull()]
+
+    # Final deduplication
+    merged = merged.drop_duplicates(subset=['DisplayName'])
+
+    # Sort by Avg_pvalue
+    merged = merged.sort_values(by="Avg_pvalue", ascending=True)
+    merged.reset_index(drop=True, inplace=True)
+    return merged
+
+def display_colored_results(df):
+    # This will pick up the new Avg_pvalue column as well
+    pval_cols = [c for c in df.columns if "p-value" in c or c == "Avg_pvalue"]
+    def highlight_cols(val):
+        try:
+            v = float(val)
+            if v < 0.05:
+                return 'background-color: pink; color: black;'
+            elif v < 0.1:
+                return 'background-color: yellow; color: black;'
+        except:
+            return ''
+        return ''
+    styler = df.style
+    for c in pval_cols:
+        styler = styler.applymap(highlight_cols, subset=[c])
+    st.write(styler.to_html(escape=False), unsafe_allow_html=True)
+
 def atac_file_from_celltype(celltype):
     name = celltype.replace("/", "_").replace(" ", "_")
     return f"scored_subclass_{name}_atac.h5ad"
@@ -63,6 +149,21 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+def to_1d_array(x):
+    """Convert a matrix/array/view to a flat 1D numpy array."""
+    # AnnData can give you a scalar, a numpy array, or a scipy sparse matrix or view
+    # .A1 or .toarray().ravel() are preferred for sparse
+    if hasattr(x, "A1"):
+        return x.A1
+    elif hasattr(x, "toarray"):
+        return x.toarray().ravel()
+    elif hasattr(x, "ravel"):
+        return x.ravel()
+    elif hasattr(x, "flatten"):
+        return x.flatten()
+    else:
+        return np.array(x).ravel()
 
 def build_mask_from_criteria(obs, criteria_list):
     mask = np.full(len(obs), True)
@@ -176,6 +277,115 @@ def add_significance_annotation(fig, text, x=0.05, y=0.95):
     )
     return fig
 
+def run_differential_expression(adata, groupA_indices, groupB_indices, groupby_name="__group_temp", pseudobulk=False, donor_col="Donor ID"):
+    if not pseudobulk:
+        adata = adata.copy()
+        adata.obs[groupby_name] = "groupB"
+        adata.obs.loc[groupA_indices, groupby_name] = "groupA"
+        sc.tl.rank_genes_groups(adata, groupby=groupby_name, groups=["groupA"], reference="groupB", method="t-test")
+        res = adata.uns["rank_genes_groups"]
+        genes = res["names"]["groupA"]
+        pvals = res["pvals"]["groupA"]
+        logfc = res["logfoldchanges"]["groupA"]
+        pvals_adj = res['pvals_adj']["groupA"]
+        min_pval = 1e-300
+        minus_log10_pval = -np.log10(np.clip(pvals, min_pval, None))
+        minus_log10_pval_adj = -np.log10(np.clip(pvals_adj, min_pval, None))
+        results = pd.DataFrame({
+            'gene': genes,
+            'logFC': logfc,
+            'minus_log10_pval': minus_log10_pval,
+            'minus_log10_pval_adj': minus_log10_pval_adj,
+        })
+        return results
+
+    # ---- Pseudobulk approach ----
+    # Restrict to filtered cells
+    sel_idx = groupA_indices.union(groupB_indices)
+    ad = adata[sel_idx].copy()
+    # Identify donor column
+    if donor_col not in ad.obs.columns:
+        raise ValueError(f"{donor_col} column not found in obs")
+    # Assign group labels to each donor based on which group is majority among their cells
+    donor_to_group = {}
+    for donor, subdf in ad.obs.groupby(donor_col):
+        n_A = (subdf.index.isin(groupA_indices)).sum()
+        n_B = (subdf.index.isin(groupB_indices)).sum()
+        if n_A >= n_B:
+            donor_to_group[donor] = "groupA"
+        else:
+            donor_to_group[donor] = "groupB"
+    # Aggregate expression per donor
+    donor_means = []
+    donor_groups = []
+    donor_ids = []
+    for donor, group in donor_to_group.items():
+        cells = ad.obs[ad.obs[donor_col]==donor].index
+        X = ad[cells].X
+        if hasattr(X, "mean"):
+            xmean = np.asarray(X.mean(axis=0)).flatten()
+        else:
+            xmean = X.mean(axis=0)
+        donor_means.append(xmean)
+        donor_groups.append(group)
+        donor_ids.append(donor)
+    # New AnnData: donors x genes
+    X_donor = np.vstack(donor_means)
+    obs_donor = pd.DataFrame({
+        groupby_name: donor_groups,
+        donor_col: donor_ids,
+    }, index=[str(d) for d in donor_ids])
+    var_donor = adata.var.copy()
+    ad_donor = sc.AnnData(X=X_donor, obs=obs_donor, var=var_donor)
+    sc.tl.rank_genes_groups(ad_donor, groupby=groupby_name, groups=["groupA"], reference="groupB", method="t-test")
+    res = ad_donor.uns["rank_genes_groups"]
+    genes = res["names"]["groupA"]
+    pvals = res["pvals"]["groupA"]
+    logfc = res["logfoldchanges"]["groupA"]
+    pvals_adj = res['pvals_adj']["groupA"]
+    min_pval = 1e-300
+    minus_log10_pval = -np.log10(np.clip(pvals, min_pval, None))
+    minus_log10_pval_adj = -np.log10(np.clip(pvals_adj, min_pval, None))
+    results = pd.DataFrame({
+        'gene': genes,
+        'logFC': logfc,
+        'minus_log10_pval': minus_log10_pval,
+        'minus_log10_pval_adj': minus_log10_pval_adj,
+    })
+    return results
+
+# ATAC version is identical except the function name
+def run_differential_accessibility(adata, groupA_indices, groupB_indices, groupby_name="__group_temp", pseudobulk=False, donor_col="Donor ID"):
+    return run_differential_expression(adata, groupA_indices, groupB_indices, groupby_name, pseudobulk, donor_col)
+
+
+def run_gsea(diff_df, gene_sets="KEGG_2016"):
+    # diff_df must have columns: 'gene', 'logFC'
+    # Sort by logFC descending (up-regulated first)
+    preranked = diff_df[['gene', 'logFC']].sort_values('logFC', ascending=False)
+    preranked.columns = ['gene_name', 'score']  # required by gseapy
+
+    # Save as .rnk file or use as DataFrame
+    # preranked.to_csv('my_rnk.rnk', sep="\t", index=False, header=False)
+
+    # Run preranked GSEA
+    pre_res = gp.prerank(
+        rnk=preranked,
+        gene_sets=gene_sets,  # Or path to .gmt file, or 'GO_Biological_Process_2021', etc.
+        processes=4,
+        permutation_num=100,  # reduce for speed, increase for publication
+        outdir=None,  # do not write to disk
+        seed=42,
+        min_size=5,
+        max_size=1000,
+    )
+
+    # Results: NES (normalized enrichment score) is positive/negative
+    if pre_res.res2d is not None:
+        return pre_res.res2d
+    else:
+        return pd.DataFrame()
+
 # --- STATE: TRACK DATA LOAD BUTTON, CELL TYPE, ETC. ---
 if "cell_type" not in st.session_state:
     st.session_state.cell_type = None
@@ -192,11 +402,6 @@ cell_type = st.session_state.cell_type
 h5ad_path = os.path.join(RNA_DATA_DIR, CELLTYPE_TO_FILE[cell_type])
 atac_file = os.path.join(ATAC_DATA_DIR, atac_file_from_celltype(cell_type))
 
-# --- SIDEBAR: LOGOUT BUTTON ---
-#if st.sidebar.button('Logout'):
-#    authenticator.logout('main')
-#    st.rerun()
-# --- SIDEBAR: LOAD BUTTON ---
 with st.sidebar:
     st.title("🧰 Controls")
     st.subheader("🧠 Cell Type")
@@ -225,6 +430,17 @@ if load_data_clicked:
             common_idx = adata.obs.index.intersection(atac_data.obs.index)
             adata._inplace_subset_obs(common_idx)
             atac_data._inplace_subset_obs(common_idx)
+
+            # Harmonize obs columns, copying actual data across (no NaN-filling!)
+            all_cols = set(adata.obs.columns).union(set(atac_data.obs.columns))
+            for col in all_cols:
+                if col not in adata.obs.columns and col in atac_data.obs.columns:
+                    adata.obs[col] = atac_data.obs[col]
+                elif col not in atac_data.obs.columns and col in adata.obs.columns:
+                    atac_data.obs[col] = adata.obs[col]
+            ordered_cols = sorted(all_cols)
+            adata.obs = adata.obs[ordered_cols]
+            atac_data.obs = atac_data.obs[ordered_cols]
             st.session_state.adata = adata
             st.session_state.atac_data = atac_data
             st.session_state.adata_path = h5ad_path
@@ -252,7 +468,6 @@ else:
     adata = None
     atac_data = None
 
-# --- REST OF APP: ONLY SHOW IF DATA IS LOADED ---
 if adata is not None and atac_data is not None:
     obs = adata.obs
     all_obs_continuous, all_obs_categorical = parse_obs_features(obs)
@@ -271,7 +486,6 @@ if adata is not None and atac_data is not None:
         if "User_selected_group" not in categorical_features:
             categorical_features.append("User_selected_group")
 
-    # --------- SIDEBAR: FILTER & GROUPS & MODULES ---------
     with st.sidebar:
         st.subheader("🔎 Filtering")
         if "filters" not in st.session_state or st.session_state.filters is None:
@@ -308,7 +522,6 @@ if adata is not None and atac_data is not None:
                 else:
                     cats = ', '.join(map(str, f['categories']))
                     st.markdown(f"• `{f['feature']} in [{cats}]`")
-        # GROUP STACK
         st.subheader("🧬 Define Group (A)")
         if "groupA" not in st.session_state or st.session_state.groupA is None:
             st.session_state.groupA = []
@@ -346,20 +559,18 @@ if adata is not None and atac_data is not None:
                     st.markdown(f"• `{g['feature']} in [{cats}]`")
         st.markdown("_Comparison group: All other filtered samples not in Group A._")
 
-        # ANALYSIS MODULE selection (always last in sidebar)
         st.subheader("⚙️ Analysis Module")
         analysis_module = st.radio(
             "Choose an analysis", [
-                "Differential Expression",
-                "Differential Accessibility",
-                "Enrichment",
-                "Feature Comparison",
-                "Survival / Progression Modeling",
                 "Dimensionality Reduction",
+                "Survival / Progression Modeling",
+                "Feature Comparison",
+                "Differential Analysis",  # <--- Single button for both RNA/ATAC
+                "Enrichment",
             ],
         )
 
-        # Module-specific controls
+        # Feature Comparison (existing logic unchanged)
         if analysis_module == "Feature Comparison":
             st.subheader("Feature Comparison Options")
             var1 = st.selectbox("Variable 1", feature_list, key="feat_comp_var1")
@@ -370,6 +581,7 @@ if adata is not None and atac_data is not None:
         else:
             run_feat_comparison = False
 
+        # ------ PATCH: Dimensionality Reduction RUN BUTTON ------
         if analysis_module == "Dimensionality Reduction":
             st.subheader("UMAP Options")
             data_type = st.selectbox("Select data type", ["RNA", "ATAC"], key="dimred_data_type")
@@ -377,6 +589,16 @@ if adata is not None and atac_data is not None:
             n_top_genes = st.slider(
                 "Number of Top Variable Genes", min_value=500, max_value=5000, value=2000, step=100, key="n_top_genes_slider"
             )
+            run_analysis = st.button("Run Dimensionality Reduction")
+        else:
+            run_analysis = False
+
+        if analysis_module == "Differential Analysis":
+            pseudobulk_diff = st.checkbox("Pseudobulk by Donor (aggregate before differential analysis)", key="pseudobulk_diff_checkbox")
+            run_diff = st.button("Run Differential Analysis")
+        else:
+            run_diff = False
+
         if analysis_module == "Survival / Progression Modeling":
             st.subheader("Pseudo-bulk Linear Modeling")
             outcome_choices = ["Continuous Pseudo-progression Score", "CPS by Age"]
@@ -389,6 +611,15 @@ if adata is not None and atac_data is not None:
             run_surv_analysis = st.button("Run Survival/Progression Modeling")
         else:
             run_surv_analysis = False
+
+        if analysis_module == "Enrichment":
+            if "diff_rna" in st.session_state and "diff_atac" in st.session_state:
+                run_enrich = st.button("Run Enrichment Analysis")
+            else:
+                st.info("Run Differential Analysis first.")
+                run_enrich = False
+        else:
+            run_enrich = False
 
     # --------- FILTERING, GROUPING, INFO BAR ---------
     obs = adata.obs
@@ -411,7 +642,6 @@ if adata is not None and atac_data is not None:
     atac_obs_filtered["User_selected_group"] = np.where(groupA_mask, 1, 0)
     atac_data.obs.loc[atac_obs_filtered.index, "User_selected_group"] = atac_obs_filtered["User_selected_group"]
 
-    # --------- INFO/STATUS BAR ---------
     status_container = st.container()
     with status_container:
         st.markdown(
@@ -422,8 +652,8 @@ if adata is not None and atac_data is not None:
 
     st.title("Multiomic Alzheimer’s Disease Dashboard (Scaffold)")
 
-    # --- ANALYSIS EXECUTION ---
-    if analysis_module == "Dimensionality Reduction" and 'run_analysis' in locals() and run_analysis:
+    # --- PATCH: Dimensionality Reduction ---
+    if analysis_module == "Dimensionality Reduction" and run_analysis:
         with st.spinner("Generating UMAP plot..."):
             data_type = st.session_state.get("dimred_data_type", "RNA")
             data_for_umap = adata if data_type == "RNA" else atac_data
@@ -447,14 +677,11 @@ if adata is not None and atac_data is not None:
                     plot_df, x='UMAP_1', y='UMAP_2', color=color_feature,
                     hover_name=plot_df.index
                 )
-                st.session_state.plots.append({
-                    "fig": fig,
-                    "title": f"UMAP ({data_type}) by {color_feature} ({len(plot_df)} cells)"
-                })
+                st.session_state.plots.insert(0,{"fig": fig,"title": f"UMAP ({data_type}) by {color_feature} ({len(plot_df)} cells)"})
             df_table_run = df_coords.copy()
             for color_feature in umap_color_by:
                 df_table_run[color_feature] = adata_umap.obs[color_feature]
-            st.session_state.table_dfs.append(df_table_run)
+            st.session_state.table_dfs.insert(0,df_table_run)
             st.toast(f"Added {len(umap_color_by)} new plot(s).")
 
     # --------- FEATURE COMPARISON (WITH PSEUDOBULK OPTION) ---------
@@ -469,7 +696,10 @@ if adata is not None and atac_data is not None:
             needed_atac_cols.append(var3)
         df = obs_filtered.copy()
         if needed_atac_cols:
-            df = df.join(atac_data.obs.loc[df.index, needed_atac_cols])
+            # Only add columns that are NOT already present
+            cols_to_add = [col for col in needed_atac_cols if col not in df.columns]
+            if cols_to_add:
+                df = df.join(atac_data.obs.loc[df.index, cols_to_add])
         col1 = var1
         col2 = var2
         col3 = var3 if var3 != "None" else None
@@ -502,7 +732,7 @@ if adata is not None and atac_data is not None:
                     r2 = r ** 2
                     text = f"Spearman ρ = {r:.2f}<br>R² = {r2:.2f}<br>p = {p:.2e}"
                     fig = add_significance_annotation(fig, text)
-                    st.session_state.plots.append({"fig": fig, "title": f"Scatter (Pseudobulk): {col1} vs {col2}"})
+                    st.session_state.plots.insert(0,{"fig": fig, "title": f"Scatter (Pseudobulk): {col1} vs {col2}"})
                     st.plotly_chart(fig, use_container_width=True)
             else:
                 if var1_cont and var2_cont:
@@ -516,7 +746,7 @@ if adata is not None and atac_data is not None:
                     r2 = r ** 2
                     text = f"Spearman ρ = {r:.2f}<br>R² = {r2:.2f}<br>p = {p:.2e}"
                     fig = add_significance_annotation(fig, text)
-                    st.session_state.plots.append({"fig": fig, "title": f"Scatter: {col1} vs {col2}"})
+                    st.session_state.plots.insert(0,{"fig": fig, "title": f"Scatter: {col1} vs {col2}"})
                     st.plotly_chart(fig, use_container_width=True)
                 elif (var1_cont and not var2_cont) or (not var1_cont and var2_cont):
                     y = col1 if var1_cont else col2
@@ -552,7 +782,7 @@ if adata is not None and atac_data is not None:
                                 font=dict(size=12, color="blue"),
                                 bgcolor="white", opacity=0.8
                             )
-                    st.session_state.plots.append({"fig": fig, "title": f"Violin: {y} by {x}"})
+                    st.session_state.plots.insert(0,{"fig": fig, "title": f"Violin: {y} by {x}"})
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     ct_count = pd.crosstab(df[col1], df[col2])  # Raw counts for the statistical test
@@ -580,14 +810,44 @@ if adata is not None and atac_data is not None:
                     else: signif = "ns"
                     text = f"{testname} p={pval:.2e} {signif}"
                     fig = add_significance_annotation(fig, text)
-                    st.session_state.plots.append({"fig": fig, "title": f"Stacked Bar: {col1} vs {col2}"})
+                    st.session_state.plots.insert(0,{"fig": fig, "title": f"Stacked Bar: {col1} vs {col2}"})
                     st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.error(f"Error generating feature comparison plot: {e}")
     elif analysis_module not in ["Feature Comparison", "Dimensionality Reduction", "Survival / Progression Modeling"]:
         st.info(f"Analysis module '{analysis_module}' is not yet implemented.")
 
-    # --- Survival / Progression Modeling (run only, results in Table tab) ---
+
+    if analysis_module == "Differential Analysis" and run_diff:
+        with st.spinner("Running differential analysis on RNA and ATAC..."):
+            # Differential expression
+            diff_rna = run_differential_expression(adata, groupA_indices, groupB_indices, pseudobulk=pseudobulk_diff)
+            diff_atac = run_differential_accessibility(atac_data, groupA_indices, groupB_indices, pseudobulk=pseudobulk_diff)
+            st.session_state.diff_rna = diff_rna
+            st.session_state.diff_atac = diff_atac
+            st.success("Differential analysis complete.")
+            # Plot: compare logFC
+            merged = pd.merge(diff_rna, diff_atac, on="gene", suffixes=("_rna", "_atac"))
+            fig = px.scatter(merged, x="logFC_rna", y="logFC_atac", hover_name="gene",
+                            color=np.where((merged['minus_log10_pval_adj_rna']>1.3)&(merged['minus_log10_pval_adj_atac']>1.3), "SigBoth", "NotSig"))
+            fig.update_layout(title="RNA vs ATAC Differential (logFC)")
+            st.session_state.plots.insert(0, {"fig": fig, "title": "RNA vs ATAC Differential (logFC)"})
+            st.session_state.table_dfs.insert(0, merged.head(50))
+
+    if analysis_module == "Enrichment" and run_enrich:
+        with st.spinner("Running enrichment on RNA and ATAC..."):
+            enrich_rna = run_gsea(st.session_state.diff_rna)
+            enrich_atac = run_gsea(st.session_state.diff_atac)
+            st.session_state.enrich_rna = enrich_rna
+            st.session_state.enrich_atac = enrich_atac
+            # Merge and plot
+            merged = pd.merge(enrich_rna, enrich_atac, on="Term", suffixes=("_rna", "_atac"))
+            fig = px.scatter(merged, x="NES_rna", y="NES_atac", hover_name="Term")
+            fig.update_layout(title="Gene Set Enrichment: RNA vs ATAC")
+            st.session_state.plots.insert(0, {"fig": fig, "title": "Gene Set Enrichment: RNA vs ATAC"})
+            st.session_state.table_dfs.insert(0, merged.head(50))
+
+    # --- Survival / Progression Modeling ---
     if analysis_module == "Survival / Progression Modeling" and run_surv_analysis:
         with st.spinner("Aggregating by Donor and running linear regression for each UCell score..."):
             outcome_var = st.session_state.surv_outcome if "surv_outcome" in st.session_state else "Continuous Pseudo-progression Score"
@@ -626,10 +886,10 @@ if adata is not None and atac_data is not None:
             if not results_df.empty:
                 results_df = results_df.sort_values(by="Coefficient", ascending=False)
                 st.session_state.survival_model_table = results_df
+                st.session_state.table_dfs.insert(0, results_df)   # <<< ADD THIS LINE
             else:
                 st.session_state.survival_model_table = pd.DataFrame()
 
-    # --- DISPLAY BLOCK ---
     col1, col2, _ = st.columns([1.2, 1, 8])
     with col1:
         if st.button("Reset Plots"):
@@ -654,22 +914,27 @@ if adata is not None and atac_data is not None:
                     st.plotly_chart(plot_info["fig"], use_container_width=True, key=f"plot_chart_{i}")
 
     with tab_table:
-        show_any_table = False
-        if analysis_module == "Survival / Progression Modeling":
-            results_df = st.session_state.get("survival_model_table", pd.DataFrame())
-            if results_df is not None and not results_df.empty:
-                outcome_name = st.session_state.surv_outcome if "surv_outcome" in st.session_state else "Continuous Pseudo-progression Score"
-                st.subheader(f"Predictive strength of UCell scores for {outcome_name}")
-                st.dataframe(results_df, use_container_width=True)
-                show_any_table = True
-        if not show_any_table:
-            if not st.session_state.table_dfs:
-                st.info("No table data available. Run an analysis to generate data.")
-            else:
-                st.subheader("Data from Analysis Runs")
-                for i, df in enumerate(st.session_state.table_dfs):
-                    st.markdown(f"**Data from Run {i+1}** ({len(df)} cells)")
-                    st.dataframe(df, use_container_width=True, key=f"table_df_{i}")
+        tables_displayed = False
+
+        # 1. Survival/progression model merged/colored table
+        results_df = st.session_state.get("survival_model_table", pd.DataFrame())
+        if results_df is not None and not results_df.empty:
+            outcome_name = st.session_state.surv_outcome if "surv_outcome" in st.session_state else "Continuous Pseudo-progression Score"
+            st.subheader(f"Predictive strength of UCell scores for {outcome_name} (RNA & ATAC)")
+            geneset_summary = load_geneset_summary_for_celltype(cell_type)  # <<<<<<<<
+            merged_df = merge_rna_atac_table(results_df, geneset_summary=geneset_summary)  # <<<<<<<<
+            display_colored_results(merged_df)
+            tables_displayed = True
+
+        # 2. All other tables (stacked vertically)
+        for i, df in enumerate(st.session_state.table_dfs):
+            idx = len(st.session_state.table_dfs) - i
+            st.markdown(f"**Data from Run {idx}** ({len(df)} cells)")
+            st.dataframe(df, use_container_width=True, key=f"table_df_{i}")
+
+        if not tables_displayed:
+            st.info("No table data available. Run an analysis to generate data.")
 
 else:
     st.info("Select a cell type and click **Load Data** to begin.")
+
