@@ -4,58 +4,32 @@ An interactive Streamlit-based dashboard for exploring multiomic single-nucleus 
 Key Features
   Data Integration
     Joint analysis of matched scRNA-seq and scATAC-seq at the gene level
-    Interactive filtering and grouping by:
-      
+    Interactive filtering and grouping by
       A. Cell subtype
-      
       B. Donor/sample metadata
-      
       C. Quality metrics
-      
       D. Disease progression scores
-    
     Multiomic support for:
-      
       A. Differential expression & accessibility
-      
       B. Gene set enrichment
-      
       C. Progression/survival modeling
-      
       D. Comparative visualization across modalities
-  
   Analysis and Visualization
-    
     Dimensionality reduction
-      
       1. Colored by metadata, RNA expression, or ATAC accessibility
-      
       2. Joint UMAP comparisons (RNA vs ATAC modalities)
-    
     Feature comparison
-      
       1. Compare gene expression/accessibility across metadata-defined groups
-
       2. Support for pseudobulk estimates with error bars
-    
     Survival/Progression modeling
-      
       1. Correlation between features and continuous disease progression scores
-
       2. Visual overlays on embeddings
-    
     Differential analysis
-      
       1. Run differential expression for RNA and differential accessibility for ATAC simultaneously
-
       2. LogFC comparison plots across modalities
-    
     Enrichment analysis
-      
       1. Run ranked GSEA for RNA and ATAC differential results
-
       2. Normalized enrichment score comparative plots for both modalities
-  
   . Modality integration:
       A. Co-embed RNA and ATAC data for joint visualization.
       B. Feature comparison across RNA expression and chromatin accessibility.
