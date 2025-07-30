@@ -109,7 +109,9 @@ def merge_rna_atac_table(df, geneset_summary=None):
          'N_overlap_RNA' if 'N_overlap_RNA' in merged.columns else None,
          'Coefficient_atac', 'p-value_atac', 'R²_atac',
          'N_overlap_ATAC' if 'N_overlap_ATAC' in merged.columns else None,
-         'Avg_pvalue']
+         'Avg_pvalue',
+         'adj_p-value_rna','significant_rna',
+         'adj_p-value_atac','significant_atac']
     ]
     # Remove columns that are None (if geneset info not present)
     merged = merged.loc[:, merged.columns.notnull()]
@@ -405,8 +407,8 @@ atac_file = os.path.join(ATAC_DATA_DIR, atac_file_from_celltype(cell_type))
 with st.sidebar:
     st.title("🧰 Controls")
     st.subheader("🧠 Cell Type")
-    st.write(f"RNA file: `{h5ad_path}`")
-    st.write(f"ATAC file: `{atac_file}`")
+    st.write(f"RNA file: `{CELLTYPE_TO_FILE[cell_type]}`")
+    st.write(f"ATAC file: `{atac_file_from_celltype(cell_type)}`")
     load_data_clicked = st.button("📥 Load Data")
 
 # --- ONLY LOAD DATA ON BUTTON PRESS ---
@@ -594,6 +596,7 @@ if adata is not None and atac_data is not None:
             run_analysis = False
 
         if analysis_module == "Differential Analysis":
+            search_gene = st.text_input("Search and highlight gene:", "")
             pseudobulk_diff = st.checkbox("Pseudobulk by Donor (aggregate before differential analysis)", key="pseudobulk_diff_checkbox")
             run_diff = st.button("Run Differential Analysis")
         else:
@@ -696,7 +699,6 @@ if adata is not None and atac_data is not None:
             needed_atac_cols.append(var3)
         df = obs_filtered.copy()
         if needed_atac_cols:
-            # Only add columns that are NOT already present
             cols_to_add = [col for col in needed_atac_cols if col not in df.columns]
             if cols_to_add:
                 df = df.join(atac_data.obs.loc[df.index, cols_to_add])
@@ -706,13 +708,12 @@ if adata is not None and atac_data is not None:
         var1_cont = is_continuous(col1, df)
         var2_cont = is_continuous(col2, df)
         try:
-            # Pseudobulk logic
+            # Pseudobulk continuous vs continuous (original, already implemented)
             if 'pseudobulk' in locals() and pseudobulk and var1_cont and var2_cont:
                 donor_col = "Donor ID"
                 if donor_col not in df.columns:
                     st.error("No donor ID column for pseudobulk aggregation.")
                 else:
-                    # Calculate mean and standard error for each donor
                     agg_funcs = {col1: ['mean', 'sem'], col2: ['mean', 'sem']}
                     pseudobulk_stats = df.groupby(donor_col)[[col1, col2]].agg(agg_funcs)
                     pseudobulk_df = pd.DataFrame({
@@ -734,6 +735,86 @@ if adata is not None and atac_data is not None:
                     fig = add_significance_annotation(fig, text)
                     st.session_state.plots.insert(0,{"fig": fig, "title": f"Scatter (Pseudobulk): {col1} vs {col2}"})
                     st.plotly_chart(fig, use_container_width=True)
+
+            # Pseudobulk continuous by factor (NEW)
+            elif 'pseudobulk' in locals() and pseudobulk and ((var1_cont and not var2_cont) or (not var1_cont and var2_cont)):
+                donor_col = "Donor ID"
+                y = col1 if var1_cont else col2  # continuous
+                x = col2 if var1_cont else col1  # factor
+                if donor_col not in df.columns:
+                    st.error("No donor ID column for pseudobulk aggregation.")
+                else:
+                    sub_df = df[[donor_col, x, y]].dropna()
+                    # Aggregate: donor + factor -> mean of y
+                    grouped = sub_df.groupby([donor_col, x])[y].mean().reset_index()
+                    # For plotting: each point is a donor's mean y for a given x
+                    fig = px.violin(
+                        grouped, x=x, y=y, box=True, points="all",
+                        hover_name=grouped[donor_col],
+                        labels={x: x, y: f"{y} (donor-mean)", donor_col: "Donor"}
+                    )
+                    # Statistical test across donor-means
+                    groups = grouped[x].dropna().unique()
+                    pvals = {}
+                    for i, group1 in enumerate(groups):
+                        for group2 in groups[i+1:]:
+                            vals1 = grouped[grouped[x]==group1][y].dropna()
+                            vals2 = grouped[grouped[x]==group2][y].dropna()
+                            if len(vals1) > 1 and len(vals2) > 1:
+                                stat, pval = ttest_ind(vals1, vals2, equal_var=False)
+                                pvals[(group1, group2)] = pval
+                    if pvals:
+                        from statsmodels.stats.multitest import multipletests
+                        _, corrected, _, _ = multipletests(list(pvals.values()), method='bonferroni')
+                        for i, ((g1, g2), raw_p) in enumerate(pvals.items()):
+                            corr_p = corrected[i]
+                            signif = ""
+                            if corr_p < 0.001: signif = "***"
+                            elif corr_p < 0.01: signif = "**"
+                            elif corr_p < 0.05: signif = "*"
+                            else: signif = "ns"
+                            fig.add_annotation(
+                                xref="paper", yref="paper", x=0.05, y=0.90 - i*0.05,
+                                showarrow=False,
+                                text=f"{g1} vs {g2}: p={corr_p:.2e} {signif}",
+                                font=dict(size=12, color="blue"),
+                                bgcolor="white", opacity=0.8
+                            )
+                    st.session_state.plots.insert(0,{"fig": fig, "title": f"Pseudobulk Violin: {y} by {x}"})
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Pseudobulk factor by factor (NEW)
+            elif 'pseudobulk' in locals() and pseudobulk and not var1_cont and not var2_cont:
+                donor_col = "Donor ID"
+                x = col1  # factor 1
+                y = col2  # factor 2
+                if donor_col not in df.columns:
+                    st.error("No donor ID column for pseudobulk aggregation.")
+                else:
+                    sub_df = df[[donor_col, x, y]].dropna()
+                    donor_groups = []
+                    for donor, ddf in sub_df.groupby(donor_col):
+                        # Fraction of each y in each x for this donor
+                        crosstab = pd.crosstab(ddf[x], ddf[y], normalize='index')
+                        flat = crosstab.stack().reset_index()
+                        flat.columns = [x, y, "Fraction"]
+                        flat[donor_col] = donor
+                        donor_groups.append(flat)
+                    donor_frac_df = pd.concat(donor_groups, ignore_index=True)
+                    # Average donor fractions per x,y group
+                    pseudobulk_avg = donor_frac_df.groupby([x, y])["Fraction"].mean().reset_index()
+                    ct_prop = pseudobulk_avg.pivot(index=x, columns=y, values="Fraction").fillna(0)
+                    fig = px.bar(
+                        ct_prop,
+                        x=ct_prop.index,
+                        y=ct_prop.columns,
+                        barmode="stack"
+                    )
+                    fig.update_yaxes(range=[0, 1], title="Mean Fraction of Cells (pseudobulk)")
+                    st.session_state.plots.insert(0,{"fig": fig, "title": f"Pseudobulk Stacked Bar: {x} vs {y}"})
+                    st.plotly_chart(fig, use_container_width=True)
+
+            # Non-pseudobulk: retain all original logic!
             else:
                 if var1_cont and var2_cont:
                     fig = px.scatter(
@@ -814,9 +895,8 @@ if adata is not None and atac_data is not None:
                     st.plotly_chart(fig, use_container_width=True)
         except Exception as e:
             st.error(f"Error generating feature comparison plot: {e}")
-    elif analysis_module not in ["Feature Comparison", "Dimensionality Reduction", "Survival / Progression Modeling"]:
+    elif analysis_module not in ["Dimensionality Reduction", "Survival / Progression Modeling", "Feature Comparison", "Differential Analysis", "Enrichment"]:
         st.info(f"Analysis module '{analysis_module}' is not yet implemented.")
-
 
     if analysis_module == "Differential Analysis" and run_diff:
         with st.spinner("Running differential analysis on RNA and ATAC..."):
@@ -828,8 +908,29 @@ if adata is not None and atac_data is not None:
             st.success("Differential analysis complete.")
             # Plot: compare logFC
             merged = pd.merge(diff_rna, diff_atac, on="gene", suffixes=("_rna", "_atac"))
-            fig = px.scatter(merged, x="logFC_rna", y="logFC_atac", hover_name="gene",
-                            color=np.where((merged['minus_log10_pval_adj_rna']>1.3)&(merged['minus_log10_pval_adj_atac']>1.3), "SigBoth", "NotSig"))
+            # Define highlight column
+            if search_gene:
+                merged['highlight'] = np.where(merged['gene'].str.upper() == search_gene.upper(), "Highlight", "Other")
+                if search_gene.upper() not in merged['gene'].str.upper().values:
+                    st.warning(f"Gene '{search_gene}' not found in results.")
+            else:
+                merged['highlight'] = "Other"
+
+            # Define size column for plotting
+            merged['point_size'] = np.where(merged['highlight'] == "Highlight", 15, 5)
+
+            # Scatter plot with custom color and size
+            fig = px.scatter(
+                merged,
+                x="logFC_rna", y="logFC_atac",
+                hover_name="gene",
+                color="highlight",
+                color_discrete_map={"Highlight": "red", "Other": "blue"},
+                symbol="highlight",
+                symbol_map={"Highlight": "star", "Other": "circle"},
+                size="point_size",  # Reference the size column here
+                size_max=15  # Optional: caps the size
+            )
             fig.update_layout(title="RNA vs ATAC Differential (logFC)")
             st.session_state.plots.insert(0, {"fig": fig, "title": "RNA vs ATAC Differential (logFC)"})
             st.session_state.table_dfs.insert(0, merged.head(50))
@@ -863,6 +964,7 @@ if adata is not None and atac_data is not None:
             donor_agg = donor_agg[~donor_agg[outcome_var].isna()]
             results = []
             import statsmodels.api as sm
+            from statsmodels.stats.multitest import multipletests
             for ucell in rna_ucell_cols + atac_ucell_cols_in_filtered:
                 if ucell not in donor_agg or donor_agg[ucell].isnull().all():
                     continue
@@ -883,6 +985,13 @@ if adata is not None and atac_data is not None:
                 except Exception:
                     continue
             results_df = pd.DataFrame(results)
+            # Apply post hoc correction to the list of p-values
+            rejected, pvals_corrected, _, _ = multipletests(results_df["p-value"], method='fdr_bh')  # or 'bonferroni'
+
+            # Add corrected p-values and significance flags to the results
+            results_df["adj_p-value"] = pvals_corrected
+            results_df["significant"] = rejected
+            print(results_df)
             if not results_df.empty:
                 results_df = results_df.sort_values(by="Coefficient", ascending=False)
                 st.session_state.survival_model_table = results_df
@@ -937,4 +1046,3 @@ if adata is not None and atac_data is not None:
 
 else:
     st.info("Select a cell type and click **Load Data** to begin.")
-
