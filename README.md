@@ -65,11 +65,10 @@ The streamlit_dashboard_forGit.py file implements an interactive Streamlit dashb
   5. Visualize progression-related molecular changes
 
 Getting Started
-This section will include:
 
-  1. Installation instructions
-  2. Environment setup (conda, pip, requirements.txt)
-  3. Example commands to run the notebook and dashboard
+  1. Set up environment using requirements.txt
+  2. Prepare data using RNA_ATAC_workflow.ipynb
+  3. Start streamlit dashboard using "streamlit run streamlit_dashboard_forGit.py"
 
 Notes
 
